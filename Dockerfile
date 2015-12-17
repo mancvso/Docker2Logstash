@@ -1,14 +1,15 @@
-FROM ubuntu:latest
+FROM ruby:2.2
 
-MAINTAINER Maksym Bilenko "sath891@gmail.com"
+MAINTAINER Antarkt Ops "ops@antarkt.com"
 
 ENV DOCKER_HOST unix:///var/run/docker.sock
 ENV LOGSTASH_URL tcp://logstash:9290
+ENV RABBITMQ_URL amqp://guest:guest@localhost:5672
+
+COPY Gemfile /app/DockerLogstash/Gemfile
+WORKDIR /app/DockerLogstash
+RUN bundle install
 
 COPY main.rb /app/DockerLogstash/main.rb
-COPY Gemfile /app/DockerLogstash/Gemfile
-
-WORKDIR /app/DockerLogstash
-RUN apt-get update && apt-get install ruby ruby-bundler -y && bundle install && apt-get clean && rm -rf /tmp/* /var/lib/apt/lists/* /var/tmp/*
 
 CMD ruby main.rb

@@ -1,15 +1,19 @@
+require 'rubygems'
 require 'docker'
 require 'colorize'
 require 'json'
 require 'socket'
+require 'bunny'
 require 'uri'
 
 class Container < Docker::Container
   Excon.defaults[:read_timeout] = nil
   def logs(metadata,opts = {})
-    logstash_sender = LogstashSender.new(metadata)
+    #logstash_sender = LogstashSender.new(metadata)
+    amqp_sender = AMQPSender.new(metadata)
     streamer = lambda do |chunk, remaining_bytes, total_bytes|
-      logstash_sender.sender(chunk.force_encoding('iso-8859-1').encode('utf-8'))
+      #logstash_sender.sender(chunk.force_encoding('iso-8859-1').encode('utf-8'))
+      amqp_sender.sender(chunk.force_encoding('iso-8859-1').encode('utf-8'))
     end
     connection.get(path_for(:logs), opts, :response_block => streamer)
   end
@@ -131,6 +135,58 @@ class LogstashSender
 
 end
 
+class AMQPSender
+  def initialize(metadata)
+    @metadata = metadata
+    @url = ENV.has_key?('RABBITMQ_URL') ? ENV['RABBITMQ_URL'] : 'amqp://guest:guest@localhost:5672'
+    @machine = ENV.has_key?('MACHINE_TOKEN') ? ENV['MACHINE_TOKEN'] : 'nomachinetoken'
+
+    begin
+      conn = Bunny.new(@url,
+        :tls_cert              => "/etc/certs/cert.pem",
+        :tls_key               => "/etc/certs/key.pem",
+        :tls_ca_certificates   => ["/etc/certs/cacert.pem"])
+      conn.start
+      channel = conn.create_channel
+      @exchange = channel.topic("amq.topic")
+    rescue Exception => e
+      sleep 5
+      puts "Unable to connect to the AMQP Listner.".yellow
+      puts e.to_s.red
+      retry
+    end
+
+  end
+
+  def sender(chunk)
+    buffer = {}
+    if valid_json?(chunk) then
+      buffer = JSON.parse(chunk).inject({}){|memo,(k,v)| memo[k.to_sym] = v; memo}
+    else
+      buffer[:Message] = chunk.gsub(/\e\[(\d+)m/, '').gsub(/\x1B\[([0-9]{1,2}(;[0-9]{1,2})?)?[m|K]/,'')
+    end
+
+    buffer[:Name] = @metadata['Name']
+    buffer[:Image] = @metadata['Config']['Image']
+    buffer[:HostName] = @metadata['Config']['Hostname']
+    buffer[:Image_Hash] = @metadata['Image']
+    buffer[:IP] = @metadata['NetworkSettings']['IPAddress']
+    buffer[:ID] = @metadata['Id']
+    buffer[:Machine] = @machine # MACHINE_TOKEN
+    
+    @exchange.publish(buffer.to_json, :content_type => "application/json", :routing_key => "antarkt.logs.service." + @metadata['Id'])
+  end
+
+  def valid_json?(json)
+    begin
+      JSON.parse(json)
+      return true
+    rescue JSON::ParserError => e
+      return false
+    end
+  end
+
+end
 
 logstash = DockerToLogstash.new
 logstash.thread_manager
